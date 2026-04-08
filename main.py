@@ -39,7 +39,14 @@ async def chat(prompt: Prompt):
             input=user_message
         )
 
-        reply_text = response.output_text
+        reply_text = ""
+
+if hasattr(response, "output") and response.output:
+    for item in response.output:
+        if hasattr(item, "content"):
+            for content in item.content:
+                if hasattr(content, "text"):
+                    reply_text += content.text
 
         return JSONResponse({
             "reply": reply_text,
