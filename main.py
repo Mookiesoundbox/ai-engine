@@ -8,23 +8,21 @@ import os
 
 app = FastAPI()
 
-# Static + templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Request model
+
 class Prompt(BaseModel):
     message: str
 
-# Home route (loads your UI)
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
-# Chat endpoint
+
 @app.post("/chat")
 async def chat(prompt: Prompt):
     user_message = prompt.message.strip()
@@ -36,23 +34,20 @@ async def chat(prompt: Prompt):
         })
 
     try:
-        response = client.responses.create(
+        response = client.chat.completions.create(
             model="gpt-4.1-mini",
-            input=user_message
+            messages=[
+                {
+                    "role": "user",
+                    "content": user_message
+                }
+            ]
         )
 
-        reply_text = ""
-
-        # Safe extraction of response text
-        if hasattr(response, "output") and response.output:
-            for item in response.output:
-                if hasattr(item, "content"):
-                    for content in item.content:
-                        if hasattr(content, "text"):
-                            reply_text += content.text
+        reply_text = response.choices[0].message.content or "No response from AI."
 
         return JSONResponse({
-            "reply": reply_text if reply_text else "No response.",
+            "reply": reply_text,
             "sources": []
         })
 
