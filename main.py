@@ -92,10 +92,12 @@ def get_db():
 
 
 def hash_password(password: str) -> str:
+    password = password[:72]  # bcrypt limit
     return pwd_context.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    password = password[:72]  # must match hashing
     return pwd_context.verify(password, password_hash)
 
 
