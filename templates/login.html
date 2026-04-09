@@ -1,79 +1,141 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Login</title>
+    <title>AI Engine Login</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body {
+            font-family: Arial, sans-serif;
             background: #111;
             color: #fff;
-            font-family: Arial;
             display: flex;
-            justify-content: center;
             align-items: center;
-            height: 100vh;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
         }
 
         .box {
-            width: 90%;
-            max-width: 400px;
+            width: 100%;
+            max-width: 420px;
+            background: #1a1a1a;
+            padding: 24px;
+            border-radius: 12px;
+            box-sizing: border-box;
+        }
+
+        h2 {
+            margin-top: 0;
+            margin-bottom: 8px;
+        }
+
+        p {
+            color: #bbb;
+            margin-top: 0;
+            margin-bottom: 20px;
         }
 
         input {
             width: 100%;
-            padding: 15px;
-            margin-bottom: 10px;
+            padding: 14px;
             border: none;
             border-radius: 8px;
+            font-size: 16px;
+            margin-bottom: 12px;
+            box-sizing: border-box;
         }
 
         button {
             width: 100%;
-            padding: 15px;
+            padding: 14px;
             border: none;
             border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+
+        #loginBtn {
             background: #4fc3f7;
             color: #000;
         }
 
+        #registerBtn {
+            background: #81c784;
+            color: #000;
+        }
+
         #error {
-            color: red;
-            margin-top: 10px;
+            color: #ff8a80;
+            margin-top: 12px;
+            min-height: 20px;
+            white-space: pre-wrap;
         }
     </style>
 </head>
 <body>
+    <div class="box">
+        <h2>Private AI Engine</h2>
+        <p>Login or create a user.</p>
 
-<div class="box">
-    <h2>Enter Password</h2>
+        <input id="username" type="text" placeholder="Username" />
+        <input id="password" type="password" placeholder="Password" />
 
-    <input id="password" type="password" placeholder="Password" />
-    <button onclick="login()">Enter</button>
+        <button id="loginBtn" onclick="login()">Login</button>
+        <button id="registerBtn" onclick="registerUser()">Create Account</button>
 
-    <div id="error"></div>
-</div>
+        <div id="error"></div>
+    </div>
 
-<script>
-async function login() {
-    const password = document.getElementById("password").value;
+    <script>
+        async function login() {
+            const username = document.getElementById("username").value.trim();
+            const password = document.getElementById("password").value.trim();
 
-    const res = await fetch("/login", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ password })
-    });
+            const res = await fetch("/login", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ username, password })
+            });
 
-    const data = await res.json();
+            const data = await res.json();
 
-    if (data.success) {
-        window.location.reload();
-    } else {
-        document.getElementById("error").innerText = "Wrong password";
-    }
-}
-</script>
+            if (data.success) {
+                window.location.href = "/";
+            } else {
+                document.getElementById("error").innerText = data.reply || "Login failed.";
+            }
+        }
 
+        async function registerUser() {
+            const username = document.getElementById("username").value.trim();
+            const password = document.getElementById("password").value.trim();
+
+            const res = await fetch("/register", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ username, password })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                window.location.href = "/";
+            } else {
+                document.getElementById("error").innerText = data.reply || "Registration failed.";
+            }
+        }
+
+        document.getElementById("password").addEventListener("keydown", function(event) {
+            if (event.key === "Enter") {
+                login();
+            }
+        });
+    </script>
 </body>
 </html>
