@@ -117,7 +117,18 @@ def get_memory(session_id: str):
 
     return {key: value for key, value in rows}
 
+def delete_memory(session_id: str, fact_key: str):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
 
+    cur.execute("""
+        DELETE FROM memory
+        WHERE session_id = ? AND fact_key = ?
+    """, (session_id, fact_key))
+
+    conn.commit()
+    conn.close()
+    
 def extract_and_store_facts(session_id: str, user_message: str):
     text = user_message.strip()
     lower = text.lower()
@@ -188,7 +199,28 @@ async def home(request: Request):
 @app.post("/chat")
 async def chat(prompt: Prompt, request: Request):
     user_message = prompt.message.strip()
+    # 🧠 Memory commands
+    lower = user_message.lower()
 
+    if "what do you remember" in lower:
+        memory_facts = get_memory(session_id)
+        if memory_facts:
+            return JSONResponse({
+                "reply": "\n".join([f"{k}: {v}" for k, v in memory_facts.items()]),
+                "sources": []
+            })
+        else:
+            return JSONResponse({
+                "reply": "I don’t have any saved info about you yet.",
+                "sources": []
+            })
+
+    if "forget my name" in lower:
+        delete_memory(session_id, "name")
+        return JSONResponse({
+            "reply": "Got it — I’ve forgotten your name.",
+            "sources": []
+        })
     if not user_message:
         return JSONResponse({
             "reply": "Say something and I’ll reply.",
