@@ -84,13 +84,19 @@ async def home(request: Request):
     if not session_id:
         session_id = str(uuid.uuid4())
 
-    response = templates.TemplateResponse("index.html", {"request": request})
+    response = templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"request": request}
+    )
+
     response.set_cookie(
         key="session_id",
         value=session_id,
         httponly=True,
         samesite="lax"
     )
+
     return response
 
 
