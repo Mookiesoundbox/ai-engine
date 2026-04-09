@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -17,10 +17,15 @@ templates = Jinja2Templates(directory="templates")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 DB_FILE = "memory.db"
+APP_PASSWORD = os.getenv("APP_PASSWORD", "changeme123")
 
 
 class Prompt(BaseModel):
     message: str
+
+
+class LoginRequest(BaseModel):
+    password: str
 
 
 def init_db():
@@ -117,6 +122,7 @@ def get_memory(session_id: str):
 
     return {key: value for key, value in rows}
 
+
 def delete_memory(session_id: str, fact_key: str):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -128,7 +134,8 @@ def delete_memory(session_id: str, fact_key: str):
 
     conn.commit()
     conn.close()
-    
+
+
 def extract_and_store_facts(session_id: str, user_message: str):
     text = user_message.strip()
     lower = text.lower()
@@ -170,13 +177,23 @@ def extract_and_store_facts(session_id: str, user_message: str):
             upsert_memory(session_id, "goal", goal)
 
 
+def is_logged_in(request: Request) -> bool:
+    return request.cookies.get("access_granted") == "yes"
+
+
 init_db()
 
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    session_id = request.cookies.get("session_id")
+    if not is_logged_in(request):
+        return templates.TemplateResponse(
+            request=request,
+            name="login.html",
+            context={"request": request, "error": ""}
+        )
 
+    session_id = request.cookies.get("session_id")
     if not session_id:
         session_id = str(uuid.uuid4())
 
@@ -196,11 +213,63 @@ async def home(request: Request):
     return response
 
 
+@app.post("/login")
+async def login(login_data: LoginRequest):
+    if login_data.password != APP_PASSWORD:
+        return JSONResponse({
+            "success": False,
+            "reply": "Wrong password."
+        }, status_code=401)
+
+    response = JSONResponse({
+        "success": True,
+        "reply": "Access granted."
+    })
+
+    response.set_cookie(
+        key="access_granted",
+        value="yes",
+        httponly=True,
+        samesite="lax"
+    )
+
+    return response
+
+
+@app.post("/logout")
+async def logout():
+    response = JSONResponse({
+        "success": True,
+        "reply": "Logged out."
+    })
+
+    response.delete_cookie("access_granted")
+    response.delete_cookie("session_id")
+
+    return response
+
+
 @app.post("/chat")
 async def chat(prompt: Prompt, request: Request):
+    if not is_logged_in(request):
+        return JSONResponse({
+            "reply": "Unauthorized",
+            "sources": []
+        }, status_code=401)
+
     user_message = prompt.message.strip()
-    # 🧠 Memory commands
+
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
     lower = user_message.lower()
+
+    if not user_message:
+        return JSONResponse({
+            "reply": "Say something and I’ll reply.",
+            "sources": []
+        })
 
     if "what do you remember" in lower:
         memory_facts = get_memory(session_id)
@@ -221,15 +290,6 @@ async def chat(prompt: Prompt, request: Request):
             "reply": "Got it — I’ve forgotten your name.",
             "sources": []
         })
-    if not user_message:
-        return JSONResponse({
-            "reply": "Say something and I’ll reply.",
-            "sources": []
-        })
-
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        session_id = str(uuid.uuid4())
 
     try:
         save_message(session_id, "user", user_message)
