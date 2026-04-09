@@ -1,6 +1,8 @@
 fastapi
 uvicorn
-openai
-pydantic
-itsdangerous
 jinja2
+python-multipart
+openai
+sqlalchemy
+passlib[bcrypt]
+itsdangerous
