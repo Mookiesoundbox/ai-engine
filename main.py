@@ -1,72 +1,180 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from openai import OpenAI
+from starlette.middleware.sessions import SessionMiddleware
 import os
+import uuid
 
 app = FastAPI()
 
-# Static + templates (if you’re using them)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+# Secret key for browser sessions
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.environ.get("SESSION_SECRET", "change-this-secret-key"),
+    same_site="lax",
+    https_only=False
+)
 
-# OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key) if api_key else None
 
-# Request model
 class Prompt(BaseModel):
     message: str
 
-# Health check
+# In-memory store for session chats
+# Note: resets on deploy/restart
+chat_store = {}
+
+def get_session_id(request: Request) -> str:
+    session_id = request.session.get("session_id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        request.session["session_id"] = session_id
+    return session_id
+
+def get_chat_history(request: Request) -> list:
+    session_id = get_session_id(request)
+    if session_id not in chat_store:
+        chat_store[session_id] = []
+    return chat_store[session_id]
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "has_api_key": bool(api_key),
+        "sessions_in_memory": len(chat_store)
+    }
 
-# TEMP MEMORY (resets on deploy)
-chat_history = []
-
-# Home page
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return """
     <html>
-    <body style="background:#111;color:white;font-family:sans-serif;padding:20px;">
-        <h2>AI Engine Live 🔥</h2>
-        <input id="msg" placeholder="Type message..." style="width:80%;padding:10px;">
-        <button onclick="send()">Send</button>
-        <button onclick="clearChat()">New Chat</button>
-        <pre id="chat"></pre>
+    <head>
+        <title>AI Engine</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+            body {
+                margin: 0;
+                padding: 0;
+                background: #111;
+                color: white;
+                font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            }
+            .wrap {
+                max-width: 700px;
+                margin: 0 auto;
+                padding: 16px;
+            }
+            h2 {
+                margin-top: 0;
+            }
+            #chat {
+                background: #1a1a1a;
+                border-radius: 14px;
+                padding: 12px;
+                min-height: 300px;
+                white-space: pre-wrap;
+                overflow-wrap: break-word;
+                margin-bottom: 12px;
+            }
+            .row {
+                display: flex;
+                gap: 8px;
+            }
+            input {
+                flex: 1;
+                padding: 14px;
+                border-radius: 12px;
+                border: none;
+                font-size: 16px;
+            }
+            button {
+                padding: 14px 16px;
+                border-radius: 12px;
+                border: none;
+                font-size: 16px;
+                cursor: pointer;
+            }
+            .topbar {
+                display: flex;
+                gap: 8px;
+                margin-bottom: 12px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <h2>AI Engine Live</h2>
+
+            <div class="topbar">
+                <button onclick="clearChat()">New Chat</button>
+            </div>
+
+            <div id="chat"></div>
+
+            <div class="row">
+                <input id="msg" placeholder="Type message..." />
+                <button onclick="send()">Send</button>
+            </div>
+        </div>
 
         <script>
-        async function send() {
-            const msg = document.getElementById("msg").value;
+            const chatBox = document.getElementById("chat");
+            const msgInput = document.getElementById("msg");
 
-            const res = await fetch("/chat", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({message: msg})
+            function addLine(text) {
+                chatBox.innerText += text + "\\n\\n";
+                chatBox.scrollTop = chatBox.scrollHeight;
+            }
+
+            async function send() {
+                const msg = msgInput.value.trim();
+                if (!msg) return;
+
+                addLine("You: " + msg);
+                msgInput.value = "";
+
+                try {
+                    const res = await fetch("/chat", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ message: msg })
+                    });
+
+                    const data = await res.json();
+                    addLine("AI: " + data.reply);
+                } catch (err) {
+                    addLine("AI: Error talking to server.");
+                }
+            }
+
+            async function clearChat() {
+                await fetch("/clear", { method: "POST" });
+                chatBox.innerText = "";
+            }
+
+            msgInput.addEventListener("keydown", function(event) {
+                if (event.key === "Enter") {
+                    send();
+                }
             });
-
-            const data = await res.json();
-            document.getElementById("chat").innerText += "\\nYou: " + msg;
-            document.getElementById("chat").innerText += "\\nAI: " + data.reply + "\\n";
-        }
-
-        async function clearChat() {
-            await fetch("/clear", { method: "POST" });
-            document.getElementById("chat").innerText = "";
-        }
         </script>
     </body>
     </html>
     """
 
-# Chat endpoint
 @app.post("/chat")
-async def chat(prompt: Prompt):
-    global chat_history
+async def chat(prompt: Prompt, request: Request):
+    if client is None:
+        return JSONResponse(
+            {
+                "reply": "OPENAI_API_KEY is missing in environment variables.",
+                "sources": []
+            },
+            status_code=500
+        )
 
     user_message = prompt.message.strip()
 
@@ -76,7 +184,8 @@ async def chat(prompt: Prompt):
             "sources": []
         })
 
-    # Store user message
+    chat_history = get_chat_history(request)
+
     chat_history.append({
         "role": "user",
         "content": user_message
@@ -88,9 +197,8 @@ async def chat(prompt: Prompt):
             messages=chat_history
         )
 
-        reply = response.choices[0].message.content
+        reply = response.choices[0].message.content or "No reply returned."
 
-        # Store assistant reply
         chat_history.append({
             "role": "assistant",
             "content": reply
@@ -102,19 +210,20 @@ async def chat(prompt: Prompt):
         })
 
     except Exception as e:
-        return JSONResponse({
-            "reply": f"Error: {str(e)}",
-            "sources": []
-        })
+        return JSONResponse(
+            {
+                "reply": f"OpenAI error: {str(e)}",
+                "sources": []
+            },
+            status_code=500
+        )
 
-# Clear chat memory
 @app.post("/clear")
-async def clear_chat():
-    global chat_history
-    chat_history = []
+async def clear_chat(request: Request):
+    session_id = get_session_id(request)
+    chat_store[session_id] = []
     return {"status": "cleared"}
 
-# Run app (for local, safe to leave)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
