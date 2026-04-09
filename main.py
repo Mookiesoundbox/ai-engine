@@ -1,11 +1,11 @@
 from datetime import datetime
 from typing import Optional
-
+import html
+import json
 import os
+
 from fastapi import FastAPI, Request, Form, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from openai import OpenAI
 from passlib.context import CryptContext
@@ -20,9 +20,6 @@ app.add_middleware(
     SessionMiddleware,
     secret_key=os.getenv("SESSION_SECRET", "change-me-now"),
 )
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -109,13 +106,6 @@ def get_current_user(request: Request, db: Session) -> Optional[User]:
     return db.query(User).filter(User.id == user_id).first()
 
 
-def require_user(request: Request, db: Session) -> User:
-    user = get_current_user(request, db)
-    if not user:
-        raise Exception("User not logged in")
-    return user
-
-
 def get_user_conversations(db: Session, user_id: int):
     return (
         db.query(Conversation)
@@ -141,32 +131,397 @@ def create_conversation(db: Session, user_id: int, title: str = "New Chat") -> C
     return convo
 
 
+def page_shell(title: str, body: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{html.escape(title)}</title>
+  <style>
+    * {{
+      box-sizing: border-box;
+    }}
+    body {{
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: #0f1115;
+      color: #fff;
+    }}
+    a {{
+      color: inherit;
+      text-decoration: none;
+    }}
+    .auth-page {{
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }}
+    .auth-card {{
+      width: 100%;
+      max-width: 400px;
+      background: #171a21;
+      border: 1px solid #262b36;
+      border-radius: 18px;
+      padding: 24px;
+    }}
+    .auth-form {{
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 16px;
+    }}
+    .auth-form input {{
+      padding: 14px 16px;
+      border-radius: 12px;
+      border: 1px solid #2a3140;
+      background: #1b2030;
+      color: white;
+      font-size: 16px;
+    }}
+    .auth-form button {{
+      padding: 14px 16px;
+      border: none;
+      border-radius: 12px;
+      background: #2b6cff;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }}
+    .muted {{
+      color: #9ea7b8;
+      font-size: 14px;
+    }}
+    .error-box {{
+      background: #481d24;
+      border: 1px solid #7d2c39;
+      color: #ffc7d0;
+      padding: 12px;
+      border-radius: 10px;
+      margin-top: 12px;
+      margin-bottom: 12px;
+    }}
+    .app-shell {{
+      display: flex;
+      min-height: 100vh;
+    }}
+    .sidebar {{
+      width: 280px;
+      background: #171a21;
+      border-right: 1px solid #262b36;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }}
+    .btn {{
+      display: inline-block;
+      background: #2b6cff;
+      color: white;
+      border: none;
+      padding: 10px 14px;
+      border-radius: 10px;
+      text-align: center;
+      cursor: pointer;
+    }}
+    .conversation-list {{
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow-y: auto;
+    }}
+    .conversation-item {{
+      background: #202533;
+      padding: 12px;
+      border-radius: 10px;
+      color: #d8deea;
+      word-break: break-word;
+    }}
+    .conversation-item.active {{
+      background: #2b6cff;
+      color: #fff;
+    }}
+    .chat-panel {{
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }}
+    .chat-header {{
+      padding: 18px 20px;
+      border-bottom: 1px solid #262b36;
+      background: #11151d;
+    }}
+    .messages {{
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }}
+    .message-row {{
+      display: flex;
+    }}
+    .message-row.user {{
+      justify-content: flex-end;
+    }}
+    .message-row.assistant {{
+      justify-content: flex-start;
+    }}
+    .message-bubble {{
+      max-width: 80%;
+      padding: 14px 16px;
+      border-radius: 16px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }}
+    .message-row.user .message-bubble {{
+      background: #2b6cff;
+      color: white;
+      border-bottom-right-radius: 6px;
+    }}
+    .message-row.assistant .message-bubble {{
+      background: #202533;
+      color: #eef2f9;
+      border-bottom-left-radius: 6px;
+    }}
+    .chat-form {{
+      display: flex;
+      gap: 12px;
+      padding: 16px;
+      border-top: 1px solid #262b36;
+      background: #11151d;
+    }}
+    .chat-form input {{
+      flex: 1;
+      padding: 14px 16px;
+      border-radius: 12px;
+      border: 1px solid #2a3140;
+      background: #1b2030;
+      color: white;
+      font-size: 16px;
+    }}
+    .chat-form button {{
+      padding: 14px 18px;
+      border: none;
+      border-radius: 12px;
+      background: #2b6cff;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }}
+    .top-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }}
+    @media (max-width: 768px) {{
+      .app-shell {{
+        flex-direction: column;
+      }}
+      .sidebar {{
+        width: 100%;
+        border-right: none;
+        border-bottom: 1px solid #262b36;
+      }}
+      .message-bubble {{
+        max-width: 92%;
+      }}
+    }}
+  </style>
+</head>
+<body>
+{body}
+</body>
+</html>"""
+
+
+def render_login_page(error: Optional[str] = None) -> str:
+    error_html = f'<div class="error-box">{html.escape(error)}</div>' if error else ""
+    body = f"""
+    <div class="auth-page">
+      <div class="auth-card">
+        <h1>Login</h1>
+        <p class="muted">Welcome back.</p>
+        {error_html}
+        <form method="post" action="/login" class="auth-form">
+          <input type="text" name="username" placeholder="Username" required />
+          <input type="password" name="password" placeholder="Password" required />
+          <button type="submit">Login</button>
+        </form>
+        <p class="muted">No account? <a href="/signup">Sign up</a></p>
+      </div>
+    </div>
+    """
+    return page_shell("Login", body)
+
+
+def render_signup_page(error: Optional[str] = None) -> str:
+    error_html = f'<div class="error-box">{html.escape(error)}</div>' if error else ""
+    body = f"""
+    <div class="auth-page">
+      <div class="auth-card">
+        <h1>Sign Up</h1>
+        <p class="muted">Create your account.</p>
+        {error_html}
+        <form method="post" action="/signup" class="auth-form">
+          <input type="text" name="username" placeholder="Username" required />
+          <input type="password" name="password" placeholder="Password" required />
+          <button type="submit">Create Account</button>
+        </form>
+        <p class="muted">Already have an account? <a href="/login">Login</a></p>
+      </div>
+    </div>
+    """
+    return page_shell("Sign Up", body)
+
+
+def render_chat_page(user: User, conversations, active_conversation, messages) -> str:
+    convo_links = []
+    for convo in conversations:
+        active_class = " active" if active_conversation and convo.id == active_conversation.id else ""
+        convo_links.append(
+            f'<a class="conversation-item{active_class}" href="/chat/{convo.id}">{html.escape(convo.title)}</a>'
+        )
+    convo_html = "\n".join(convo_links) if convo_links else '<p class="muted">No chats yet.</p>'
+
+    msg_html_parts = []
+    for msg in messages:
+        role = "assistant"
+        if msg.role == "user":
+            role = "user"
+        msg_html_parts.append(
+            f'<div class="message-row {role}"><div class="message-bubble">{html.escape(msg.content)}</div></div>'
+        )
+    msg_html = "\n".join(msg_html_parts) if msg_html_parts else '<p class="muted">Start a new chat below.</p>'
+
+    active_title = html.escape(active_conversation.title) if active_conversation else "New Chat"
+    conversation_id_js = "null" if active_conversation is None else json.dumps(active_conversation.id)
+
+    body = f"""
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="top-row">
+          <div>
+            <h2>Chats</h2>
+            <p class="muted">Logged in as <strong>{html.escape(user.username)}</strong></p>
+          </div>
+          <a class="btn" href="/logout">Logout</a>
+        </div>
+
+        <a class="btn" href="/new-chat">+ New Chat</a>
+
+        <div class="conversation-list">
+          {convo_html}
+        </div>
+      </aside>
+
+      <main class="chat-panel">
+        <div class="chat-header">
+          <h1>{active_title}</h1>
+        </div>
+
+        <div id="messages" class="messages">
+          {msg_html}
+        </div>
+
+        <form id="chat-form" class="chat-form">
+          <input id="message-input" type="text" name="message" placeholder="Message your AI..." autocomplete="off" required />
+          <button type="submit">Send</button>
+        </form>
+      </main>
+    </div>
+
+    <script>
+      let conversationId = {conversation_id_js};
+      const form = document.getElementById("chat-form");
+      const input = document.getElementById("message-input");
+      const messages = document.getElementById("messages");
+
+      function addMessage(role, text) {{
+        const row = document.createElement("div");
+        row.className = "message-row " + role;
+
+        const bubble = document.createElement("div");
+        bubble.className = "message-bubble";
+        bubble.textContent = text;
+
+        row.appendChild(bubble);
+        messages.appendChild(row);
+        messages.scrollTop = messages.scrollHeight;
+      }}
+
+      form.addEventListener("submit", async (e) => {{
+        e.preventDefault();
+
+        const text = input.value.trim();
+        if (!text) return;
+
+        addMessage("user", text);
+        input.value = "";
+        input.disabled = true;
+
+        try {{
+          const res = await fetch("/chat", {{
+            method: "POST",
+            headers: {{
+              "Content-Type": "application/json"
+            }},
+            body: JSON.stringify({{
+              message: text,
+              conversation_id: conversationId
+            }})
+          }});
+
+          const data = await res.json();
+          addMessage("assistant", data.reply);
+
+          if (!conversationId && data.conversation_id) {{
+            window.location.href = "/chat/" + data.conversation_id;
+          }}
+        }} catch (err) {{
+          addMessage("assistant", "Something went wrong.");
+        }} finally {{
+          input.disabled = false;
+          input.focus();
+        }}
+      }});
+    </script>
+    """
+    return page_shell("AI Engine", body)
+
+
 # -----------------------------
 # Auth routes
 # -----------------------------
 @app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+def login_page():
+    return HTMLResponse(render_login_page())
 
 
 @app.get("/signup", response_class=HTMLResponse)
-def signup_page(request: Request):
-    return templates.TemplateResponse("signup.html", {"request": request})
+def signup_page():
+    return HTMLResponse(render_signup_page())
 
 
 @app.post("/signup")
-def signup(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+def signup(username: str = Form(...), password: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
     username = username.strip()
 
     if len(username) < 3:
-        return templates.TemplateResponse("signup.html", {"request": request, "error": "Username must be at least 3 characters."})
+        return HTMLResponse(render_signup_page("Username must be at least 3 characters."))
 
     if len(password) < 6:
-        return templates.TemplateResponse("signup.html", {"request": request, "error": "Password must be at least 6 characters."})
+        return HTMLResponse(render_signup_page("Password must be at least 6 characters."))
 
     existing_user = db.query(User).filter(User.username == username).first()
     if existing_user:
-        return templates.TemplateResponse("signup.html", {"request": request, "error": "Username already taken."})
+        return HTMLResponse(render_signup_page("Username already taken."))
 
     user = User(username=username, password_hash=hash_password(password))
     db.add(user)
@@ -178,12 +533,12 @@ def signup(request: Request, username: str = Form(...), password: str = Form(...
 
 
 @app.post("/login")
-def login(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+def login(username: str = Form(...), password: str = Form(...), request: Request = None, db: Session = Depends(get_db)):
     username = username.strip()
     user = db.query(User).filter(User.username == username).first()
 
     if not user or not verify_password(password, user.password_hash):
-        return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid username or password."})
+        return HTMLResponse(render_login_page("Invalid username or password."))
 
     request.session["user_id"] = user.id
     return RedirectResponse(url="/", status_code=303)
@@ -217,16 +572,7 @@ def home(request: Request, db: Session = Depends(get_db)):
     else:
         messages = []
 
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "user": user,
-            "conversations": conversations,
-            "active_conversation": active_conversation,
-            "messages": messages,
-        },
-    )
+    return HTMLResponse(render_chat_page(user, conversations, active_conversation, messages))
 
 
 @app.get("/new-chat")
@@ -257,16 +603,7 @@ def open_chat(conversation_id: int, request: Request, db: Session = Depends(get_
         .all()
     )
 
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "user": user,
-            "conversations": conversations,
-            "active_conversation": active_conversation,
-            "messages": messages,
-        },
-    )
+    return HTMLResponse(render_chat_page(user, conversations, active_conversation, messages))
 
 
 # -----------------------------
