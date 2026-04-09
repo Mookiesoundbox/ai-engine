@@ -4,30 +4,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from openai import OpenAI
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    Text,
-    ForeignKey,
-    DateTime,
-)
+from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 from passlib.context import CryptContext
 from starlette.middleware.sessions import SessionMiddleware
 from datetime import datetime
 import os
 
-# -----------------------------
-# App setup
-# -----------------------------
 app = FastAPI()
+
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.getenv("SESSION_SECRET", "change-this-in-render-env"),
-    same_site="lax",
-    https_only=False,  # Render usually handles HTTPS in front of app
+    secret_key=os.getenv("SESSION_SECRET", "super-secret"),
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -35,55 +23,45 @@ templates = Jinja2Templates(directory="templates")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# -----------------------------
-# Database setup
-# -----------------------------
 DATABASE_URL = "sqlite:///./app.db"
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False}
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine)
 
+Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-# -----------------------------
-# Database models
-# -----------------------------
+# ---------------- MODELS ----------------
+
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, index=True, nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True)
+    password_hash = Column(String)
 
-    conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
+    conversations = relationship("Conversation", back_populates="user")
 
 
 class Conversation(Base):
     __tablename__ = "conversations"
 
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String(255), default="New Chat")
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id = Column(Integer, primary_key=True)
+    title = Column(String, default="New Chat")
+    user_id = Column(Integer, ForeignKey("users.id"))
 
     user = relationship("User", back_populates="conversations")
-    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+    messages = relationship("Message", back_populates="conversation")
 
 
 class Message(Base):
     __tablename__ = "messages"
 
-    id = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
-    role = Column(String(20), nullable=False)  # "user" or "assistant"
-    content = Column(Text, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id = Column(Integer, primary_key=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"))
+    role = Column(String)
+    content = Column(Text)
 
     conversation = relationship("Conversation", back_populates="messages")
 
@@ -91,17 +69,8 @@ class Message(Base):
 Base.metadata.create_all(bind=engine)
 
 
-# -----------------------------
-# Pydantic models
-# -----------------------------
-class ChatPayload(BaseModel):
-    message: str
-    conversation_id: int | None = None
+# ---------------- HELPERS ----------------
 
-
-# -----------------------------
-# Helpers
-# -----------------------------
 def get_db():
     db = SessionLocal()
     try:
@@ -110,54 +79,23 @@ def get_db():
         db.close()
 
 
-def hash_password(password: str) -> str:
+def hash_password(password):
     return pwd_context.hash(password)
 
 
-def verify_password(plain_password: str, password_hash: str) -> bool:
-    return pwd_context.verify(plain_password, password_hash)
+def verify_password(password, hashed):
+    return pwd_context.verify(password, hashed)
 
 
-def get_current_user(request: Request, db: Session) -> User | None:
+def get_user(request, db):
     user_id = request.session.get("user_id")
     if not user_id:
         return None
     return db.query(User).filter(User.id == user_id).first()
 
 
-def require_user(request: Request, db: Session) -> User:
-    user = get_current_user(request, db)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not logged in")
-    return user
+# ---------------- ROUTES ----------------
 
-
-def create_new_conversation(db: Session, user_id: int, first_message: str | None = None) -> Conversation:
-    title = "New Chat"
-    if first_message:
-        title = first_message.strip()[:40] or "New Chat"
-
-    convo = Conversation(
-        title=title,
-        user_id=user_id,
-    )
-    db.add(convo)
-    db.commit()
-    db.refresh(convo)
-    return convo
-
-
-def get_conversation_for_user(db: Session, user_id: int, conversation_id: int) -> Conversation | None:
-    return (
-        db.query(Conversation)
-        .filter(Conversation.id == conversation_id, Conversation.user_id == user_id)
-        .first()
-    )
-
-
-# -----------------------------
-# Routes - auth pages
-# -----------------------------
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
@@ -168,91 +106,43 @@ def signup_page(request: Request):
     return templates.TemplateResponse("signup.html", {"request": request, "error": None})
 
 
-@app.post("/signup", response_class=HTMLResponse)
-def signup(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-    db: Session = Depends(get_db),
-):
-    username = username.strip()
+@app.post("/signup")
+def signup(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == username).first():
+        return templates.TemplateResponse("signup.html", {"request": request, "error": "Username taken"})
 
-    if len(username) < 3:
-        return templates.TemplateResponse(
-            "signup.html",
-            {"request": request, "error": "Username must be at least 3 characters."}
-        )
-
-    if len(password) < 6:
-        return templates.TemplateResponse(
-            "signup.html",
-            {"request": request, "error": "Password must be at least 6 characters."}
-        )
-
-    existing_user = db.query(User).filter(User.username == username).first()
-    if existing_user:
-        return templates.TemplateResponse(
-            "signup.html",
-            {"request": request, "error": "That username is already taken."}
-        )
-
-    user = User(
-        username=username,
-        password_hash=hash_password(password)
-    )
+    user = User(username=username, password_hash=hash_password(password))
     db.add(user)
     db.commit()
-    db.refresh(user)
 
     request.session["user_id"] = user.id
+    return RedirectResponse("/", status_code=303)
 
-    return RedirectResponse(url="/", status_code=303)
 
-
-@app.post("/login", response_class=HTMLResponse)
-def login(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-    db: Session = Depends(get_db),
-):
-    username = username.strip()
-
+@app.post("/login")
+def login(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
+
     if not user or not verify_password(password, user.password_hash):
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Invalid username or password."}
-        )
+        return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid login"})
 
     request.session["user_id"] = user.id
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/logout")
 def logout(request: Request):
     request.session.clear()
-    return RedirectResponse(url="/login", status_code=303)
+    return RedirectResponse("/login", status_code=303)
 
 
-# -----------------------------
-# Routes - app pages
-# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
-    user = get_current_user(request, db)
+    user = get_user(request, db)
     if not user:
-        return RedirectResponse(url="/login", status_code=303)
+        return RedirectResponse("/login", status_code=303)
 
-    conversations = (
-        db.query(Conversation)
-        .filter(Conversation.user_id == user.id)
-        .order_by(Conversation.created_at.desc())
-        .all()
-    )
-
-    active_conversation = conversations[0] if conversations else None
-    messages = active_conversation.messages if active_conversation else []
+    conversations = db.query(Conversation).filter(Conversation.user_id == user.id).all()
 
     return templates.TemplateResponse(
         "index.html",
@@ -260,122 +150,71 @@ def home(request: Request, db: Session = Depends(get_db)):
             "request": request,
             "user": user,
             "conversations": conversations,
-            "active_conversation": active_conversation,
-            "messages": messages,
-        }
-    )
-
-
-@app.get("/chat/{conversation_id}", response_class=HTMLResponse)
-def open_chat(conversation_id: int, request: Request, db: Session = Depends(get_db)):
-    user = require_user(request, db)
-
-    conversations = (
-        db.query(Conversation)
-        .filter(Conversation.user_id == user.id)
-        .order_by(Conversation.created_at.desc())
-        .all()
-    )
-
-    active_conversation = get_conversation_for_user(db, user.id, conversation_id)
-    if not active_conversation:
-        return RedirectResponse(url="/", status_code=303)
-
-    messages = (
-        db.query(Message)
-        .filter(Message.conversation_id == active_conversation.id)
-        .order_by(Message.created_at.asc())
-        .all()
-    )
-
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "user": user,
-            "conversations": conversations,
-            "active_conversation": active_conversation,
-            "messages": messages,
+            "active_conversation": None,
+            "messages": [],
         }
     )
 
 
 @app.get("/new-chat")
 def new_chat(request: Request, db: Session = Depends(get_db)):
-    user = require_user(request, db)
-    convo = create_new_conversation(db, user.id)
-    return RedirectResponse(url=f"/chat/{convo.id}", status_code=303)
-
-
-# -----------------------------
-# Chat API
-# -----------------------------
-@app.post("/chat")
-def chat(payload: ChatPayload, request: Request, db: Session = Depends(get_db)):
-    user = require_user(request, db)
-
-    user_message = payload.message.strip()
-    if not user_message:
-        return JSONResponse(
-            {
-                "reply": "Say something and I’ll reply.",
-                "conversation_id": payload.conversation_id,
-            }
-        )
-
-    # Find or create conversation
-    conversation = None
-    if payload.conversation_id:
-        conversation = get_conversation_for_user(db, user.id, payload.conversation_id)
-
-    if not conversation:
-        conversation = create_new_conversation(db, user.id, first_message=user_message)
-
-    # Save user message
-    user_db_message = Message(
-        conversation_id=conversation.id,
-        role="user",
-        content=user_message,
-    )
-    db.add(user_db_message)
+    user = get_user(request, db)
+    convo = Conversation(user_id=user.id)
+    db.add(convo)
     db.commit()
 
-    # Load conversation history
-    history = (
-        db.query(Message)
-        .filter(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.asc())
-        .all()
-    )
+    return RedirectResponse(f"/chat/{convo.id}", status_code=303)
 
-    openai_messages = [
-        {"role": msg.role, "content": msg.content}
-        for msg in history
-    ]
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=openai_messages,
-        )
+@app.get("/chat/{conversation_id}", response_class=HTMLResponse)
+def open_chat(conversation_id: int, request: Request, db: Session = Depends(get_db)):
+    user = get_user(request, db)
 
-        assistant_reply = response.choices[0].message.content.strip()
+    convo = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    messages = db.query(Message).filter(Message.conversation_id == convo.id).all()
 
-    except Exception as e:
-        assistant_reply = f"Error talking to AI: {str(e)}"
+    conversations = db.query(Conversation).filter(Conversation.user_id == user.id).all()
 
-    # Save assistant message
-    assistant_db_message = Message(
-        conversation_id=conversation.id,
-        role="assistant",
-        content=assistant_reply,
-    )
-    db.add(assistant_db_message)
-    db.commit()
-
-    return JSONResponse(
+    return templates.TemplateResponse(
+        "index.html",
         {
-            "reply": assistant_reply,
-            "conversation_id": conversation.id,
+            "request": request,
+            "user": user,
+            "conversations": conversations,
+            "active_conversation": convo,
+            "messages": messages,
         }
     )
+
+
+class ChatPayload(BaseModel):
+    message: str
+    conversation_id: int | None = None
+
+
+@app.post("/chat")
+def chat(payload: ChatPayload, request: Request, db: Session = Depends(get_db)):
+    user = get_user(request, db)
+
+    convo = db.query(Conversation).filter(Conversation.id == payload.conversation_id).first()
+
+    user_msg = Message(conversation_id=convo.id, role="user", content=payload.message)
+    db.add(user_msg)
+    db.commit()
+
+    history = db.query(Message).filter(Message.conversation_id == convo.id).all()
+
+    messages = [{"role": m.role, "content": m.content} for m in history]
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=messages,
+    )
+
+    reply = response.choices[0].message.content
+
+    ai_msg = Message(conversation_id=convo.id, role="assistant", content=reply)
+    db.add(ai_msg)
+    db.commit()
+
+    return JSONResponse({"reply": reply, "conversation_id": convo.id})
