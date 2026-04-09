@@ -9,7 +9,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 from openai import OpenAI
 from passlib.context import CryptContext
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
