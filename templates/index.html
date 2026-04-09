@@ -82,7 +82,10 @@
     const input = document.getElementById("message-input");
     const messages = document.getElementById("messages");
 
-    let conversationId = {{ active_conversation.id if active_conversation else "null" }};
+    let conversationId = null;
+{% if active_conversation %}
+conversationId = {{ active_conversation.id }};
+{% endif %}
 
     function addMessage(role, text) {
       const row = document.createElement("div");
