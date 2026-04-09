@@ -5,80 +5,144 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body {
-            font-family: Arial;
+            font-family: Arial, sans-serif;
             background: #111;
             color: #fff;
             padding: 20px;
+            margin: 0;
         }
+
         #chat {
-            max-width: 600px;
-            margin: auto;
+            max-width: 700px;
+            margin: 0 auto;
         }
+
+        h2 {
+            margin-top: 10px;
+        }
+
+        #topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        #messages {
+            min-height: 300px;
+            margin-bottom: 15px;
+            white-space: pre-wrap;
+        }
+
         .msg {
             margin: 10px 0;
+            padding: 12px;
+            border-radius: 10px;
+            max-width: 90%;
         }
+
         .user {
-            color: #4fc3f7;
+            background: #1e3a5f;
         }
+
         .ai {
-            color: #81c784;
+            background: #1f4d2e;
         }
+
+        .row {
+            display: flex;
+            gap: 10px;
+        }
+
         input {
-            width: 80%;
-            padding: 10px;
+            flex: 1;
+            padding: 14px;
             border: none;
-            border-radius: 5px;
+            border-radius: 8px;
+            font-size: 16px;
         }
+
         button {
-            padding: 10px;
+            padding: 14px 16px;
             border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        #sendBtn {
             background: #4fc3f7;
             color: #000;
-            border-radius: 5px;
+        }
+
+        #logoutBtn {
+            background: #333;
+            color: #fff;
         }
     </style>
 </head>
 <body>
+    <div id="chat">
+        <div id="topbar">
+            <h2>AI Engine</h2>
+            <button id="logoutBtn" onclick="logout()">Logout</button>
+        </div>
 
-<div id="chat">
-    <h2>AI Engine</h2>
+        <div id="messages"></div>
 
-    <div id="messages"></div>
+        <div class="row">
+            <input id="input" placeholder="Ask something..." />
+            <button id="sendBtn" onclick="send()">Send</button>
+        </div>
+    </div>
 
-    <input id="input" placeholder="Ask something..." />
-    <button onclick="send()">Send</button>
-</div>
+    <script>
+        async function send() {
+            const input = document.getElementById("input");
+            const msg = input.value.trim();
+            if (!msg) return;
 
-<script>
-async function send() {
-    const input = document.getElementById("input");
-    const msg = input.value;
-    if (!msg) return;
+            addMessage("You: " + msg, "user");
+            input.value = "";
 
-    addMessage("You: " + msg, "user");
+            const res = await fetch("/chat", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ message: msg })
+            });
 
-    input.value = "";
+            const data = await res.json();
 
-    const res = await fetch("/chat", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ message: msg })
-    });
+            if (res.status === 401) {
+                window.location.reload();
+                return;
+            }
 
-    const data = await res.json();
+            addMessage("AI: " + data.reply, "ai");
+        }
 
-    addMessage("AI: " + data.reply, "ai");
-}
+        function addMessage(text, type) {
+            const div = document.createElement("div");
+            div.className = "msg " + type;
+            div.innerText = text;
+            document.getElementById("messages").appendChild(div);
+            window.scrollTo(0, document.body.scrollHeight);
+        }
 
-function addMessage(text, type) {
-    const div = document.createElement("div");
-    div.className = "msg " + type;
-    div.innerText = text;
-    document.getElementById("messages").appendChild(div);
-}
-</script>
+        async function logout() {
+            await fetch("/logout", {
+                method: "POST"
+            });
+            window.location.reload();
+        }
 
+        document.getElementById("input").addEventListener("keydown", function(event) {
+            if (event.key === "Enter") {
+                send();
+            }
+        });
+    </script>
 </body>
 </html>
