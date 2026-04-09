@@ -1,473 +1,381 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, Form, Depends, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from openai import OpenAI
-import os
-import sqlite3
-import uuid
-import hashlib
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Text,
+    ForeignKey,
+    DateTime,
+)
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
+from passlib.context import CryptContext
+from starlette.middleware.sessions import SessionMiddleware
 from datetime import datetime
+import os
 
+# -----------------------------
+# App setup
+# -----------------------------
 app = FastAPI()
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=os.getenv("SESSION_SECRET", "change-this-in-render-env"),
+    same_site="lax",
+    https_only=False,  # Render usually handles HTTPS in front of app
+)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-DB_FILE = "memory.db"
+# -----------------------------
+# Database setup
+# -----------------------------
+DATABASE_URL = "sqlite:///./app.db"
+
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-class Prompt(BaseModel):
+# -----------------------------
+# Database models
+# -----------------------------
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), default="New Chat")
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="conversations")
+    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
+    role = Column(String(20), nullable=False)  # "user" or "assistant"
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    conversation = relationship("Conversation", back_populates="messages")
+
+
+Base.metadata.create_all(bind=engine)
+
+
+# -----------------------------
+# Pydantic models
+# -----------------------------
+class ChatPayload(BaseModel):
     message: str
+    conversation_id: int | None = None
 
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# -----------------------------
+# Helpers
+# -----------------------------
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    return pwd_context.hash(password)
 
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            fact_key TEXT NOT NULL,
-            fact_value TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(user_id, fact_key)
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+def verify_password(plain_password: str, password_hash: str) -> bool:
+    return pwd_context.verify(plain_password, password_hash)
 
 
-def create_user(username: str, password: str) -> bool:
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    try:
-        cur.execute("""
-            INSERT INTO users (username, password_hash, created_at)
-            VALUES (?, ?, ?)
-        """, (username.strip().lower(), hash_password(password), datetime.utcnow().isoformat()))
-        conn.commit()
-        success = True
-    except sqlite3.IntegrityError:
-        success = False
-
-    conn.close()
-    return success
-
-
-def get_user_by_username(username: str):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, username, password_hash
-        FROM users
-        WHERE username = ?
-    """, (username.strip().lower(),))
-
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def verify_user(username: str, password: str):
-    user = get_user_by_username(username)
-    if not user:
-        return None
-
-    user_id, db_username, password_hash = user
-    if hash_password(password) == password_hash:
-        return {"id": user_id, "username": db_username}
-
-    return None
-
-
-def get_user_by_id(user_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT id, username
-        FROM users
-        WHERE id = ?
-    """, (user_id,))
-
-    row = cur.fetchone()
-    conn.close()
-
-    if row:
-        return {"id": row[0], "username": row[1]}
-    return None
-
-
-def save_message(user_id: int, role: str, content: str):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO messages (user_id, role, content, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, role, content, datetime.utcnow().isoformat()))
-
-    conn.commit()
-    conn.close()
-
-
-def get_recent_messages(user_id: int, limit: int = 12):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT role, content
-        FROM messages
-        WHERE user_id = ?
-        ORDER BY id DESC
-        LIMIT ?
-    """, (user_id, limit))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    rows.reverse()
-    return [{"role": role, "content": content} for role, content in rows]
-
-
-def upsert_memory(user_id: int, fact_key: str, fact_value: str):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO memory (user_id, fact_key, fact_value, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id, fact_key)
-        DO UPDATE SET
-            fact_value = excluded.fact_value,
-            updated_at = excluded.updated_at
-    """, (user_id, fact_key, fact_value, datetime.utcnow().isoformat()))
-
-    conn.commit()
-    conn.close()
-
-
-def get_memory(user_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT fact_key, fact_value
-        FROM memory
-        WHERE user_id = ?
-        ORDER BY updated_at DESC
-    """, (user_id,))
-
-    rows = cur.fetchall()
-    conn.close()
-
-    return {key: value for key, value in rows}
-
-
-def delete_memory(user_id: int, fact_key: str):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        DELETE FROM memory
-        WHERE user_id = ? AND fact_key = ?
-    """, (user_id, fact_key))
-
-    conn.commit()
-    conn.close()
-
-
-def extract_and_store_facts(user_id: int, user_message: str):
-    text = user_message.strip()
-    lower = text.lower()
-
-    if "my name is " in lower:
-        idx = lower.find("my name is ")
-        name = text[idx + len("my name is "):].strip(" .,!?\n\t")
-        if name:
-            upsert_memory(user_id, "name", name)
-
-    elif "i am " in lower:
-        idx = lower.find("i am ")
-        possible_name = text[idx + len("i am "):].strip(" .,!?\n\t")
-        if possible_name and len(possible_name.split()) <= 3:
-            upsert_memory(user_id, "name", possible_name)
-
-    if "i like " in lower:
-        idx = lower.find("i like ")
-        preference = text[idx + len("i like "):].strip(" .,!?\n\t")
-        if preference:
-            upsert_memory(user_id, "likes", preference)
-
-    if "i prefer " in lower:
-        idx = lower.find("i prefer ")
-        preference = text[idx + len("i prefer "):].strip(" .,!?\n\t")
-        if preference:
-            upsert_memory(user_id, "preference", preference)
-
-    if "i am building " in lower:
-        idx = lower.find("i am building ")
-        project = text[idx + len("i am building "):].strip(" .,!?\n\t")
-        if project:
-            upsert_memory(user_id, "project", project)
-
-    if "my goal is " in lower:
-        idx = lower.find("my goal is ")
-        goal = text[idx + len("my goal is "):].strip(" .,!?\n\t")
-        if goal:
-            upsert_memory(user_id, "goal", goal)
-
-
-def get_logged_in_user(request: Request):
-    user_id = request.cookies.get("user_id")
+def get_current_user(request: Request, db: Session) -> User | None:
+    user_id = request.session.get("user_id")
     if not user_id:
         return None
-
-    try:
-        user_id = int(user_id)
-    except ValueError:
-        return None
-
-    return get_user_by_id(user_id)
+    return db.query(User).filter(User.id == user_id).first()
 
 
-init_db()
-
-
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    user = get_logged_in_user(request)
-
+def require_user(request: Request, db: Session) -> User:
+    user = get_current_user(request, db)
     if not user:
-        return templates.TemplateResponse(
-            request=request,
-            name="login.html",
-            context={"request": request}
-        )
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return user
 
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={"request": request, "username": user["username"]}
+
+def create_new_conversation(db: Session, user_id: int, first_message: str | None = None) -> Conversation:
+    title = "New Chat"
+    if first_message:
+        title = first_message.strip()[:40] or "New Chat"
+
+    convo = Conversation(
+        title=title,
+        user_id=user_id,
+    )
+    db.add(convo)
+    db.commit()
+    db.refresh(convo)
+    return convo
+
+
+def get_conversation_for_user(db: Session, user_id: int, conversation_id: int) -> Conversation | None:
+    return (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id, Conversation.user_id == user_id)
+        .first()
     )
 
 
-@app.post("/register")
-async def register(login_data: LoginRequest):
-    username = login_data.username.strip().lower()
-    password = login_data.password.strip()
+# -----------------------------
+# Routes - auth pages
+# -----------------------------
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request, "error": None})
 
-    if not username or not password:
-        return JSONResponse({
-            "success": False,
-            "reply": "Username and password are required."
-        }, status_code=400)
+
+@app.get("/signup", response_class=HTMLResponse)
+def signup_page(request: Request):
+    return templates.TemplateResponse("signup.html", {"request": request, "error": None})
+
+
+@app.post("/signup", response_class=HTMLResponse)
+def signup(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    username = username.strip()
+
+    if len(username) < 3:
+        return templates.TemplateResponse(
+            "signup.html",
+            {"request": request, "error": "Username must be at least 3 characters."}
+        )
 
     if len(password) < 6:
-        return JSONResponse({
-            "success": False,
-            "reply": "Password must be at least 6 characters."
-        }, status_code=400)
-
-    created = create_user(username, password)
-
-    if not created:
-        return JSONResponse({
-            "success": False,
-            "reply": "Username already exists."
-        }, status_code=400)
-
-    user = verify_user(username, password)
-
-    response = JSONResponse({
-        "success": True,
-        "reply": "Account created.",
-        "username": username
-    })
-
-    response.set_cookie(
-        key="user_id",
-        value=str(user["id"]),
-        httponly=True,
-        samesite="lax"
-    )
-
-    return response
-
-
-@app.post("/login")
-async def login(login_data: LoginRequest):
-    username = login_data.username.strip().lower()
-    password = login_data.password.strip()
-
-    user = verify_user(username, password)
-
-    if not user:
-        return JSONResponse({
-            "success": False,
-            "reply": "Wrong username or password."
-        }, status_code=401)
-
-    response = JSONResponse({
-        "success": True,
-        "reply": "Access granted.",
-        "username": user["username"]
-    })
-
-    response.set_cookie(
-        key="user_id",
-        value=str(user["id"]),
-        httponly=True,
-        samesite="lax"
-    )
-
-    return response
-
-
-@app.post("/logout")
-async def logout():
-    response = JSONResponse({
-        "success": True,
-        "reply": "Logged out."
-    })
-
-    response.delete_cookie("user_id")
-    return response
-
-
-@app.get("/me")
-async def me(request: Request):
-    user = get_logged_in_user(request)
-
-    if not user:
-        return JSONResponse({"logged_in": False})
-
-    return JSONResponse({
-        "logged_in": True,
-        "username": user["username"]
-    })
-
-
-@app.post("/chat")
-async def chat(prompt: Prompt, request: Request):
-    user = get_logged_in_user(request)
-
-    if not user:
-        return JSONResponse({
-            "reply": "Unauthorized",
-            "sources": []
-        }, status_code=401)
-
-    user_id = user["id"]
-    user_message = prompt.message.strip()
-    lower = user_message.lower()
-
-    if not user_message:
-        return JSONResponse({
-            "reply": "Say something and I’ll reply.",
-            "sources": []
-        })
-
-    if "what do you remember" in lower:
-        memory_facts = get_memory(user_id)
-        if memory_facts:
-            return JSONResponse({
-                "reply": "\n".join([f"{k}: {v}" for k, v in memory_facts.items()]),
-                "sources": []
-            })
-        else:
-            return JSONResponse({
-                "reply": "I don’t have any saved info about you yet.",
-                "sources": []
-            })
-
-    if "forget my name" in lower:
-        delete_memory(user_id, "name")
-        return JSONResponse({
-            "reply": "Got it — I’ve forgotten your name.",
-            "sources": []
-        })
-
-    try:
-        save_message(user_id, "user", user_message)
-        extract_and_store_facts(user_id, user_message)
-
-        recent_history = get_recent_messages(user_id, limit=12)
-        memory_facts = get_memory(user_id)
-
-        if memory_facts:
-            memory_text = "\n".join([f"- {key}: {value}" for key, value in memory_facts.items()])
-        else:
-            memory_text = "No saved user facts yet."
-
-        system_prompt = {
-            "role": "system",
-            "content": (
-                "You are a highly intelligent, practical AI assistant. "
-                "You speak in a confident, friendly tone. "
-                "You explain things clearly and naturally. "
-                "You adapt to the user's style. "
-                "Use the saved memory facts below when helpful and relevant.\n\n"
-                f"Saved user facts:\n{memory_text}"
-            )
-        }
-
-        messages = [system_prompt] + recent_history
-
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages
+        return templates.TemplateResponse(
+            "signup.html",
+            {"request": request, "error": "Password must be at least 6 characters."}
         )
 
-        reply = response.choices[0].message.content or "No reply returned."
+    existing_user = db.query(User).filter(User.username == username).first()
+    if existing_user:
+        return templates.TemplateResponse(
+            "signup.html",
+            {"request": request, "error": "That username is already taken."}
+        )
 
-        save_message(user_id, "assistant", reply)
+    user = User(
+        username=username,
+        password_hash=hash_password(password)
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
 
-        return JSONResponse({
-            "reply": reply,
-            "sources": [],
-            "memory": memory_facts,
-            "username": user["username"]
-        })
+    request.session["user_id"] = user.id
+
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/login", response_class=HTMLResponse)
+def login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    username = username.strip()
+
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not verify_password(password, user.password_hash):
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Invalid username or password."}
+        )
+
+    request.session["user_id"] = user.id
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
+
+
+# -----------------------------
+# Routes - app pages
+# -----------------------------
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+
+    conversations = (
+        db.query(Conversation)
+        .filter(Conversation.user_id == user.id)
+        .order_by(Conversation.created_at.desc())
+        .all()
+    )
+
+    active_conversation = conversations[0] if conversations else None
+    messages = active_conversation.messages if active_conversation else []
+
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "user": user,
+            "conversations": conversations,
+            "active_conversation": active_conversation,
+            "messages": messages,
+        }
+    )
+
+
+@app.get("/chat/{conversation_id}", response_class=HTMLResponse)
+def open_chat(conversation_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+
+    conversations = (
+        db.query(Conversation)
+        .filter(Conversation.user_id == user.id)
+        .order_by(Conversation.created_at.desc())
+        .all()
+    )
+
+    active_conversation = get_conversation_for_user(db, user.id, conversation_id)
+    if not active_conversation:
+        return RedirectResponse(url="/", status_code=303)
+
+    messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == active_conversation.id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "user": user,
+            "conversations": conversations,
+            "active_conversation": active_conversation,
+            "messages": messages,
+        }
+    )
+
+
+@app.get("/new-chat")
+def new_chat(request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    convo = create_new_conversation(db, user.id)
+    return RedirectResponse(url=f"/chat/{convo.id}", status_code=303)
+
+
+# -----------------------------
+# Chat API
+# -----------------------------
+@app.post("/chat")
+def chat(payload: ChatPayload, request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+
+    user_message = payload.message.strip()
+    if not user_message:
+        return JSONResponse(
+            {
+                "reply": "Say something and I’ll reply.",
+                "conversation_id": payload.conversation_id,
+            }
+        )
+
+    # Find or create conversation
+    conversation = None
+    if payload.conversation_id:
+        conversation = get_conversation_for_user(db, user.id, payload.conversation_id)
+
+    if not conversation:
+        conversation = create_new_conversation(db, user.id, first_message=user_message)
+
+    # Save user message
+    user_db_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=user_message,
+    )
+    db.add(user_db_message)
+    db.commit()
+
+    # Load conversation history
+    history = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc())
+        .all()
+    )
+
+    openai_messages = [
+        {"role": msg.role, "content": msg.content}
+        for msg in history
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=openai_messages,
+        )
+
+        assistant_reply = response.choices[0].message.content.strip()
 
     except Exception as e:
-        return JSONResponse({
-            "reply": f"Error: {str(e)}",
-            "sources": []
-        }, status_code=500)
+        assistant_reply = f"Error talking to AI: {str(e)}"
+
+    # Save assistant message
+    assistant_db_message = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=assistant_reply,
+    )
+    db.add(assistant_db_message)
+    db.commit()
+
+    return JSONResponse(
+        {
+            "reply": assistant_reply,
+            "conversation_id": conversation.id,
+        }
+    )
