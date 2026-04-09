@@ -29,8 +29,39 @@ chat_history = []
 
 # Home page
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def home():
+    return """
+    <html>
+    <body style="background:#111;color:white;font-family:sans-serif;padding:20px;">
+        <h2>AI Engine Live 🔥</h2>
+        <input id="msg" placeholder="Type message..." style="width:80%;padding:10px;">
+        <button onclick="send()">Send</button>
+        <button onclick="clearChat()">New Chat</button>
+        <pre id="chat"></pre>
+
+        <script>
+        async function send() {
+            const msg = document.getElementById("msg").value;
+
+            const res = await fetch("/chat", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({message: msg})
+            });
+
+            const data = await res.json();
+            document.getElementById("chat").innerText += "\\nYou: " + msg;
+            document.getElementById("chat").innerText += "\\nAI: " + data.reply + "\\n";
+        }
+
+        async function clearChat() {
+            await fetch("/clear", { method: "POST" });
+            document.getElementById("chat").innerText = "";
+        }
+        </script>
+    </body>
+    </html>
+    """
 
 # Chat endpoint
 @app.post("/chat")
