@@ -1,7 +1,7 @@
 fastapi
 uvicorn
-jinja2
 python-multipart
 openai
 sqlalchemy
+passlib
 itsdangerous
