@@ -2,146 +2,107 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Your AI Engine</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AI Engine</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <div class="app-shell">
 
-    <aside class="sidebar">
-      <div class="sidebar-top">
-        <div>
-          <h2>Chats</h2>
-          <p class="muted">Logged in as <strong>{{ user.username }}</strong></p>
-        </div>
-        <a class="btn btn-small" href="/logout">Logout</a>
-      </div>
+<div class="app-shell">
 
-      <a class="btn new-chat-btn" href="/new-chat">+ New Chat</a>
+  <aside class="sidebar">
+    <h2>Chats</h2>
 
-      <div class="conversation-list">
-        {% if conversations %}
-          {% for convo in conversations %}
-            <a
-              class="conversation-item {% if active_conversation and convo.id == active_conversation.id %}active{% endif %}"
-              href="/chat/{{ convo.id }}"
-            >
-              {{ convo.title }}
-            </a>
-          {% endfor %}
+    <a href="/new-chat" class="btn">+ New Chat</a>
+
+    <div class="conversation-list">
+      {% if conversations %}
+        {% for convo in conversations %}
+          <a href="/chat/{{ convo.id }}" class="conversation-item">
+            {{ convo.title }}
+          </a>
+        {% endfor %}
+      {% else %}
+        <p>No chats yet.</p>
+      {% endif %}
+    </div>
+  </aside>
+
+  <main class="chat-panel">
+
+    <div class="chat-header">
+      <h1>
+        {% if active_conversation %}
+          {{ active_conversation.title }}
         {% else %}
-          <p class="muted">No chats yet.</p>
+          New Chat
         {% endif %}
-      </div>
-    </aside>
+      </h1>
+    </div>
 
-    <main class="chat-panel">
-      <div class="chat-header">
-        <h1>
-          {% if active_conversation %}
-            {{ active_conversation.title }}
-          {% else %}
-            New Chat
-          {% endif %}
-        </h1>
-      </div>
-
-      <div id="messages" class="messages">
-        {% if messages %}
-          {% for msg in messages %}
-            <div class="message-row {{ msg.role }}">
-              <div class="message-bubble">{{ msg.content }}</div>
-            </div>
-          {% endfor %}
-        {% else %}
-          <div class="empty-state">
-            <h2>Ready when you are</h2>
-            <p>Start a new chat below.</p>
+    <div id="messages" class="messages">
+      {% if messages %}
+        {% for msg in messages %}
+          <div class="message-row {{ msg.role }}">
+            <div class="message-bubble">{{ msg.content }}</div>
           </div>
-        {% endif %}
-      </div>
+        {% endfor %}
+      {% else %}
+        <p>Start chatting...</p>
+      {% endif %}
+    </div>
 
-      <form id="chat-form" class="chat-form">
-        <input
-          id="message-input"
-          type="text"
-          name="message"
-          placeholder="Message your AI..."
-          autocomplete="off"
-          required
-        />
-        <button type="submit">Send</button>
-      </form>
-    </main>
+    <form id="chat-form" class="chat-form">
+      <input id="message-input" type="text" placeholder="Message..." required />
+      <button type="submit">Send</button>
+    </form>
 
-  </div>
+  </main>
 
-  <script>
-    const form = document.getElementById("chat-form");
-    const input = document.getElementById("message-input");
-    const messages = document.getElementById("messages");
+</div>
 
-    let conversationId = null;
+<script>
+let conversationId = null;
 {% if active_conversation %}
 conversationId = {{ active_conversation.id }};
 {% endif %}
 
-    function addMessage(role, text) {
-      const row = document.createElement("div");
-      row.className = `message-row ${role}`;
+const form = document.getElementById("chat-form");
+const input = document.getElementById("message-input");
+const messages = document.getElementById("messages");
 
-      const bubble = document.createElement("div");
-      bubble.className = "message-bubble";
-      bubble.textContent = text;
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
 
-      row.appendChild(bubble);
-      messages.appendChild(row);
-      messages.scrollTop = messages.scrollHeight;
-    }
+  const text = input.value.trim();
+  if (!text) return;
 
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
+  const div = document.createElement("div");
+  div.innerText = text;
+  messages.appendChild(div);
 
-      const text = input.value.trim();
-      if (!text) return;
+  input.value = "";
 
-      const emptyState = messages.querySelector(".empty-state");
-      if (emptyState) emptyState.remove();
+  const res = await fetch("/chat", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      message: text,
+      conversation_id: conversationId
+    })
+  });
 
-      addMessage("user", text);
-      input.value = "";
-      input.disabled = true;
+  const data = await res.json();
 
-      try {
-        const res = await fetch("/chat", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            message: text,
-            conversation_id: conversationId
-          })
-        });
+  const reply = document.createElement("div");
+  reply.innerText = data.reply;
+  messages.appendChild(reply);
 
-        const data = await res.json();
+  if (!conversationId && data.conversation_id) {
+    window.location.href = "/chat/" + data.conversation_id;
+  }
+});
+</script>
 
-        addMessage("assistant", data.reply);
-
-        if (!conversationId && data.conversation_id) {
-          conversationId = data.conversation_id;
-          window.location.href = `/chat/${conversationId}`;
-        }
-      } catch (err) {
-        addMessage("assistant", "Something went wrong.");
-      } finally {
-        input.disabled = false;
-        input.focus();
-      }
-    });
-
-    messages.scrollTop = messages.scrollHeight;
-  </script>
 </body>
 </html>
